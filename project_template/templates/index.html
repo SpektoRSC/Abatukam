@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Карта скорости интернета</title>
+    <script src="https://api-maps.yandex.ru/2.1/?apikey=YOUR_API_KEY&lang=ru_RU" type="text/javascript"></script>
+    <style>
+        body { font-family: Arial, sans-serif; background-color: #f4f4f9; padding: 20px; }
+        .container { max-width: 800px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); }
+        #map { width: 100%; height: 400px; margin-top: 20px; border-radius: 8px; overflow: hidden; }
+        button { background-color: #007bff; color: white; border: none; padding: 12px 24px; font-size: 16px; border-radius: 5px; cursor: pointer; transition: 0.3s; }
+        button:disabled { background-color: #ccc; cursor: not-allowed; }
+        button:hover:not(:disabled) { background-color: #0056b3; }
+        .stats { margin: 20px 0; font-size: 18px; display: flex; gap: 20px; }
+        .stat-box { padding: 15px; background: #e9ecef; border-radius: 5px; flex: 1; text-align: center; }
+        .stat-box strong { font-size: 24px; color: #333; display: block; margin-top: 5px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Тест скорости (Cloudflare Engine)</h1>
+
+        <div style="margin-bottom: 20px;">
+            <input type="checkbox" id="shareData" checked>
+            <label for="shareData">Поделиться результатом на общей карте (сохранить геопозицию)</label>
+        </div>
+
+        <button id="runTestBtn">Запустить тест</button>
+
+        <div class="stats">
+            <div class="stat-box">Пинг: <strong id="pingVal">--</strong></div>
+            <div class="stat-box">Скачивание: <strong id="downVal">--</strong></div>
+            <div class="stat-box">Отдача: <strong id="upVal">--</strong></div>
+        </div>
+
+        <div id="map"></div>
+    </div>
+
+    <script type="module">
+        import SpeedTest from 'https://cdn.jsdelivr.net/npm/@cloudflare/speedtest@1.7.0/+esm';
+
+        // Инициализация Яндекс Карт
+        let myMap;
+        ymaps.ready(init);
+        function init(){
+            myMap = new ymaps.Map("map", {
+                center: [55.76, 37.64], // Москва
+                zoom: 10
+            });
+            loadPublicResults();
+        }
+
+        function loadPublicResults() {
+            fetch('/api/public_results')
+                .then(response => response.json())
+                .then(data => {
+                    data.forEach(item => {
+                        let placemark = new ymaps.Placemark([item.lat, item.lon], {
+                            balloonContent: `Скорость: ${parseFloat(item.download).toFixed(1)} Мбит/с<br>Пинг: ${item.ping} мс`
+                        }, { preset: 'islands#blueDotIcon' });
+                        myMap.geoObjects.add(placemark);
+                    });
+                });
+        }
+
+        const btn = document.getElementById('runTestBtn');
+        const pingVal = document.getElementById('pingVal');
+        const downVal = document.getElementById('downVal');
+        const upVal = document.getElementById('upVal');
+
+        btn.addEventListener('click', () => {
+            btn.innerText = "Идет замер (около 15 секунд)...";
+            btn.disabled = true;
+
+            // Сбрасываем старые значения
+            pingVal.innerText = "...";
+            downVal.innerText = "...";
+            upVal.innerText = "...";
+
+            // Создаем и запускаем тест Cloudflare
+            const engine = new SpeedTest({ autoStart: true });
+
+            // Обновляем цифры на экране прямо в процессе замера
+            engine.onResultsChange = () => {
+                const summary = engine.results.getSummary();
+                if (summary.latency) pingVal.innerText = summary.latency.toFixed(1) + " мс";
+                if (summary.download) downVal.innerText = (summary.download / 1000000).toFixed(1) + " Мбит/с";
+                if (summary.upload) upVal.innerText = (summary.upload / 1000000).toFixed(1) + " Мбит/с";
+            };
+
+            // Когда тест полностью завершен
+            engine.onFinish = results => {
+                const summary = results.getSummary();
+
+                // Переводим биты в секунду в мегабиты
+                const downloadMbps = (summary.download / 1000000).toFixed(1);
+                const uploadMbps = (summary.upload / 1000000).toFixed(1);
+                const pingMs = summary.latency.toFixed(1);
+
+                // Фиксируем финальные значения
+                pingVal.innerText = pingMs + " мс";
+                downVal.innerText = downloadMbps + " Мбит/с";
+                upVal.innerText = uploadMbps + " Мбит/с";
+
+                const isPublic = document.getElementById('shareData').checked;
+
+                // Отправляем данные на наш Python-сервер
+                if (isPublic && navigator.geolocation) {
+                    navigator.geolocation.getCurrentPosition(
+                        (position) => {
+                            sendData(downloadMbps, uploadMbps, pingMs, position.coords.latitude, position.coords.longitude, true);
+                        },
+                        (error) => {
+                            alert("Браузер не дал доступ к геопозиции. Результат сохранен анонимно.");
+                            sendData(downloadMbps, uploadMbps, pingMs, null, null, false);
+                        }
+                    );
+                } else {
+                    sendData(downloadMbps, uploadMbps, pingMs, null, null, false);
+                }
+
+                btn.innerText = "Запустить тест заново";
+                btn.disabled = false;
+            };
+
+            engine.onError = (error) => {
+                alert("Произошла ошибка при тестировании: " + error);
+                btn.innerText = "Запустить тест";
+                btn.disabled = false;
+            };
+        });
+
+        function sendData(download, upload, ping, lat, lon, is_public) {
+            fetch('/api/save_result', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    download: download,
+                    upload: upload,
+                    ping: ping,
+                    lat: lat,
+                    lon: lon,
+                    is_public: is_public
+                })
+            })
+            .then(res => res.json())
+            .then(data => {
+                // Если всё ок и у нас есть координаты, ставим красную точку (свой результат) на карту
+                if(is_public && lat && lon) {
+                     let myPlacemark = new ymaps.Placemark([lat, lon], {
+                            balloonContent: `Мой результат: ${download} Мбит/с`
+                        }, { preset: 'islands#redDotIcon' });
+                     myMap.geoObjects.add(myPlacemark);
+                     myMap.setCenter([lat, lon], 13); // Центрируем карту на нас
+                }
+            });
+        }
+    </script>
+</body>
+</html>
